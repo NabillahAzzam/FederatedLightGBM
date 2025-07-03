@@ -1,328 +1,192 @@
+# fl_client1.py
+
 #!/usr/bin/env python3
 """
-Federated Learning Client 1 untuk deteksi penipuan kartu kredit
-Menggunakan LightGBM dengan Differential Privacy dan Encryption
+NFS-based Federated Learning Client 1 untuk deteksi penipuan kartu kredit
 """
-
-import socket
+import os
 import pickle
+import json
 import numpy as np
+import pandas as pd
 import lightgbm as lgb
 from sklearn.datasets import make_classification
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report
-from cryptography.fernet import Fernet
+from sklearn.metrics import roc_auc_score
+from sklearn.preprocessing import StandardScaler
 import time
 import logging
-import os
+from datetime import datetime
+import argparse
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - CLIENT1 - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-class FederatedClient:
-    def __init__(self, client_id=1, server_host='localhost', server_port=8888):
+# Class NFSFederatedClient (SAMA PERSIS seperti sebelumnya)
+# ... (Salin seluruh class NFSFederatedClient dari jawaban sebelumnya)
+class NFSFederatedClient:
+    def __init__(self, client_id, nfs_path='/shared/federated_learning', max_rounds=5):
         self.client_id = client_id
-        self.server_host = server_host
-        self.server_port = server_port
+        self.nfs_path = nfs_path
+        self.max_rounds = max_rounds
+        self.current_round = 0
+        
+        self.logger = logging.getLogger(f'CLIENT_{client_id}')
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(f'%(asctime)s - CLIENT {self.client_id} - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.INFO)
+            self.logger.propagate = False
+
+        self.models_dir = os.path.join(nfs_path, 'models')
+        self.global_dir = os.path.join(nfs_path, 'global')
+        self.status_dir = os.path.join(nfs_path, 'status')
+        self.results_dir = os.path.join(nfs_path, 'results')
+        
+        for dir_path in [self.models_dir, self.global_dir, self.status_dir, self.results_dir]:
+            os.makedirs(dir_path, exist_ok=True)
+        
+        self.X_train, self.X_val, self.y_train, self.y_val = self._load_local_data()
         self.local_model = None
         self.global_model = None
-        self.cipher = None
-        self.privacy_epsilon = 1.0  # Differential privacy parameter
         
-        # Generate local dataset for this client
-        self.X_train, self.X_val, self.y_train, self.y_val = self._generate_local_data()
-        
-        logger.info(f"Client {client_id} initialized")
-        logger.info(f"Local training data shape: {self.X_train.shape}")
-        logger.info(f"Local validation data shape: {self.X_val.shape}")
+        self.logger.info(f"Client {client_id} initialized")
+        self.logger.info(f"NFS Path: {nfs_path}")
+        self.logger.info(f"Training data shape: {self.X_train.shape}")
+        self.logger.info(f"Validation data shape: {self.X_val.shape}")
     
-    def _generate_local_data(self):
-        """Load real local credit card fraud dataset"""
-        try:
-            import pandas as pd
-            from sklearn.preprocessing import StandardScaler
-            
-            # Option 1: Load data khusus untuk client ini
-            if self.client_id == 1:
-                data_file = 'dataset/client1_data.csv'
-            else:
-                data_file = 'dataset/client2_data.csv'
-            
-            # Option 2: Split data besar menjadi bagian untuk setiap client
-            if not os.path.exists(data_file):
-                data_file = 'dataset/train.csv'
-                data = pd.read_csv(data_file)
-                
-                # Split data berdasarkan client_id
-                total_samples = len(data)
-                client_samples = total_samples // 2  # Bagi 2 untuk 2 client
-                
-                start_idx = (self.client_id - 1) * client_samples
-                end_idx = start_idx + client_samples
-                
-                if self.client_id == 2:  # Client terakhir ambil sisa data
-                    end_idx = total_samples
-                    
-                data = data.iloc[start_idx:end_idx]
-            else:
-                data = pd.read_csv(data_file)
-            
-            # Sesuaikan nama kolom target
-            target_column = 'Class'  # Ganti sesuai dataset Anda
-            
-            # Pisahkan features dan target
-            X = data.drop(target_column, axis=1)
-            y = data[target_column]
-            
-            # Handle missing values
-            X = X.fillna(X.mean())
-            
-            # Feature scaling
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
-            
-            # Split train-validation
-            X_train, X_val, y_train, y_val = train_test_split(
-                X_scaled, y.values, 
-                test_size=0.2, 
-                random_state=42 + self.client_id, 
-                stratify=y
-            )
-            
-            logger.info(f"Client {self.client_id} real data loaded:")
-            logger.info(f"Training: {X_train.shape[0]} samples, {X_train.shape[1]} features")
-            logger.info(f"Validation: {X_val.shape[0]} samples")
-            logger.info(f"Fraud ratio - Train: {y_train.mean():.4f}, Val: {y_val.mean():.4f}")
-            
-            return X_train, X_val, y_train, y_val
-            
-        except Exception as e:
-            logger.error(f"Error loading real dataset: {e}")
-            logger.info("Falling back to synthetic data")
+    def _load_local_data(self):
+        # Cari dataset spesifik untuk klien
+        dataset_path = f'dataset/client{self.client_id}_data.csv'
+        shared_dataset_path = f'/shared/dataset/client{self.client_id}_data.csv'
+
+        data = None
+        data_file = None
+
+        if os.path.exists(dataset_path):
+            data_file = dataset_path
+        elif os.path.exists(shared_dataset_path):
+            data_file = shared_dataset_path
+
+        if data_file:
+            self.logger.info(f"Loading specific dataset from: {data_file}")
+            data = pd.read_csv(data_file)
+        else:
+            self.logger.warning(f"No specific dataset found for client {self.client_id}. Check for {dataset_path} or {shared_dataset_path}.")
+            self.logger.info("Falling back to synthetic data.")
             return self._generate_synthetic_data()
 
-    def _generate_synthetic_data(self):
-        """Fallback synthetic data"""
-        np.random.seed(42 + self.client_id)
-        
-        X, y = make_classification(
-            n_samples=2000,
-            n_features=20,
-            n_redundant=2,
-            n_informative=18,
-            n_clusters_per_class=1,
-            weights=[0.92, 0.08],
-            random_state=42 + self.client_id
-        )
-    
-        return train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-    
-    def _add_differential_privacy_noise(self, model_params, epsilon=1.0):
-        """
-        Add differential privacy noise to model parameters
-        """
-        try:
-            # Calculate sensitivity (simplified approach)
-            sensitivity = 1.0 / len(self.X_train)
-            
-            # Add Laplace noise to model predictions instead of parameters
-            # This is a simplified DP approach for demonstration
-            noise_scale = sensitivity / epsilon
-            
-            # Add noise to model predictions on validation set
-            val_predictions = model_params.predict(self.X_val)
-            noisy_predictions = val_predictions + np.random.laplace(0, noise_scale, len(val_predictions))
-            
-            # Clip predictions to valid range [0, 1]
-            noisy_predictions = np.clip(noisy_predictions, 0, 1)
-            
-            logger.info(f"Added differential privacy noise with epsilon={epsilon}")
-            
-            return model_params, noisy_predictions
-            
-        except Exception as e:
-            logger.error(f"Error adding DP noise: {e}")
-            return model_params, model_params.predict(self.X_val)
-    
-    def _train_local_model(self):
-        """Train local LightGBM model dengan parameter untuk dataset real"""
-        try:
-            # Parameter yang disesuaikan untuk fraud detection
-            params = {
-                'objective': 'binary',
-                'metric': ['binary_logloss', 'auc'],
-                'boosting_type': 'gbdt',
-                'num_leaves': 31 if self.client_id == 1 else 25,
-                'learning_rate': 0.05,  # Lebih kecil untuk dataset real
-                'feature_fraction': 0.8,
-                'bagging_fraction': 0.8,
-                'bagging_freq': 5,
-                'verbose': -1,
-                'random_state': 42 + self.client_id,
-                'is_unbalance': True,
-                'min_data_in_leaf': 20,
-                'lambda_l1': 0.1,
-                'lambda_l2': 0.1,
-                'max_depth': 6,
-                'min_gain_to_split': 0.1
-            }
-            
-            # Create LightGBM datasets
-            train_data = lgb.Dataset(self.X_train, label=self.y_train)
-            val_data = lgb.Dataset(self.X_val, label=self.y_val, reference=train_data)
-            
-            # Train model dengan lebih banyak iterations
-            self.local_model = lgb.train(
-                params,
-                train_data,
-                num_boost_round=200,  # Lebih banyak untuk dataset real
-                valid_sets=[val_data],
-                callbacks=[
-                    lgb.early_stopping(stopping_rounds=20),
-                    lgb.log_evaluation(period=0)  # Silent training
-                ],
-                verbose_eval=False
-            )
-            
-            # Evaluasi dengan metrik yang lebih lengkap
-            train_pred = self.local_model.predict(self.X_train)
-            val_pred = self.local_model.predict(self.X_val)
-            
-            from sklearn.metrics import roc_auc_score, precision_recall_fscore_support
-            
-            train_auc = roc_auc_score(self.y_train, train_pred)
-            val_auc = roc_auc_score(self.y_val, val_pred)
-            
-            train_pred_binary = (train_pred > 0.5).astype(int)
-            val_pred_binary = (val_pred > 0.5).astype(int)
-            
-            train_precision, train_recall, train_f1, _ = precision_recall_fscore_support(
-                self.y_train, train_pred_binary, average='binary'
-            )
-            val_precision, val_recall, val_f1, _ = precision_recall_fscore_support(
-                self.y_val, val_pred_binary, average='binary'
-            )
-            
-            logger.info(f"Local model trained successfully")
-            logger.info(f"Training - AUC: {train_auc:.4f}, Precision: {train_precision:.4f}, Recall: {train_recall:.4f}, F1: {train_f1:.4f}")
-            logger.info(f"Validation - AUC: {val_auc:.4f}, Precision: {val_precision:.4f}, Recall: {val_recall:.4f}, F1: {val_f1:.4f}")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error training local model: {e}")
-            return False
-    
-    def _connect_to_server(self):
-        """Connect to federated server and exchange models"""
-        max_retries = 3
-        retry_delay = 5
-        
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Attempting to connect to server (attempt {attempt + 1}/{max_retries})")
-                
-                # Create socket connection
-                client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                client_socket.settimeout(30)  # 30 second timeout
-                client_socket.connect((self.server_host, self.server_port))
-                
-                logger.info("Connected to server successfully")
-                
-                # Receive encryption key from server
-                encryption_key = client_socket.recv(44)  # Fernet key is 44 bytes
-                self.cipher = Fernet(encryption_key)
-                logger.info("Received encryption key from server")
-                
-                # Receive global model from server
-                model_size_data = client_socket.recv(4)
-                if model_size_data:
-                    model_size = int.from_bytes(model_size_data, byteorder='big')
-                    
-                    # Receive encrypted model
-                    encrypted_model = b''
-                    while len(encrypted_model) < model_size:
-                        chunk = client_socket.recv(min(4096, model_size - len(encrypted_model)))
-                        if not chunk:
-                            break
-                        encrypted_model += chunk
-                    
-                    # Decrypt and deserialize global model
-                    decrypted_model = self.cipher.decrypt(encrypted_model)
-                    self.global_model = pickle.loads(decrypted_model)
-                    logger.info("Received global model from server")
-                
-                # Train local model
-                if self._train_local_model():
-                    # Add differential privacy noise
-                    noisy_model, noisy_predictions = self._add_differential_privacy_noise(
-                        self.local_model, 
-                        self.privacy_epsilon
-                    )
-                    
-                    # Prepare data to send to server
-                    client_data = {
-                        'model': noisy_model,
-                        'predictions': noisy_predictions,
-                        'client_id': self.client_id
-                    }
-                    
-                    # Encrypt and send to server
-                    serialized_data = pickle.dumps(client_data)
-                    encrypted_data = self.cipher.encrypt(serialized_data)
-                    
-                    # Send data size first
-                    data_size = len(encrypted_data)
-                    client_socket.send(data_size.to_bytes(4, byteorder='big'))
-                    
-                    # Send encrypted data
-                    client_socket.sendall(encrypted_data)
-                    logger.info("Sent encrypted local model to server")
-                    
-                    client_socket.close()
-                    return True
-                
-            except socket.timeout:
-                logger.warning(f"Connection timeout on attempt {attempt + 1}")
-            except ConnectionRefusedError:
-                logger.warning(f"Connection refused on attempt {attempt + 1}")
-            except Exception as e:
-                logger.error(f"Connection error on attempt {attempt + 1}: {e}")
-            
-            if attempt < max_retries - 1:
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-        
-        logger.error("Failed to connect to server after all retries")
-        return False
-    
-    def run_federated_learning(self, max_rounds=5):
-        """Run federated learning for multiple rounds"""
-        logger.info(f"Starting federated learning client {self.client_id}")
-        
-        for round_num in range(max_rounds):
-            logger.info(f"\n=== CLIENT {self.client_id} - ROUND {round_num + 1}/{max_rounds} ===")
-            
-            if self._connect_to_server():
-                logger.info(f"Round {round_num + 1} completed successfully")
-            else:
-                logger.error(f"Round {round_num + 1} failed")
-                break
-            
-            # Wait before next round
-            if round_num < max_rounds - 1:
-                logger.info("Waiting 15 seconds before next round...")
-                time.sleep(15)
-        
-        logger.info(f"Client {self.client_id} federated learning completed")
+        target_candidates = ['Class', 'isFraud', 'fraud', 'target', 'label']
+        target_col = next((col for col in target_candidates if col in data.columns), data.columns[-1])
 
-if __name__ == "__main__":
-    # Client 1 configuration
-    client = FederatedClient(
-        client_id=1,
-        server_host='localhost',
-        server_port=8888
-    )
+        X = data.drop(target_col, axis=1)
+        y = data[target_col]
+        X = X.fillna(X.mean())
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        X_train, X_val, y_train, y_val = train_test_split(X_scaled, y.values, test_size=0.2, random_state=42 + self.client_id, stratify=y)
+        self.logger.info(f"Real dataset loaded. Train: {X_train.shape[0]} samples, Val: {X_val.shape[0]} samples.")
+        return X_train, X_val, y_train, y_val
+
+    # ... (Metode lainnya: _generate_synthetic_data, _wait_for_global_model, _load_global_model, _train_local_model, _save_local_model, _wait_for_round_completion) ...
+    # ... (Salin semua metode ini dari jawaban sebelumnya, mereka tidak berubah) ...
+    def _generate_synthetic_data(self):
+        np.random.seed(42 + self.client_id)
+        X, y = make_classification(n_samples=2000, n_features=30, n_redundant=5, n_informative=25, n_clusters_per_class=1, weights=[0.92, 0.08], random_state=42 + self.client_id)
+        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+        self.logger.info("Generated synthetic dataset")
+        return X_train, X_val, y_train, y_val
+    def _wait_for_global_model(self, round_num, timeout=300):
+        self.logger.info(f"Waiting for global model for round {round_num}")
+        start_time = time.time()
+        status_file = os.path.join(self.status_dir, f'global_model_ready_round_{round_num}.flag')
+        while not os.path.exists(status_file):
+            if time.time() - start_time > timeout:
+                self.logger.error(f"Timeout waiting for global model for round {round_num}")
+                return False
+            time.sleep(2)
+        self.logger.info(f"Global model ready signal found for round {round_num}")
+        return True
+    def _load_global_model(self, round_num):
+        try:
+            model_path = os.path.join(self.global_dir, f'global_model_round_{round_num}.pkl')
+            time.sleep(1) 
+            with open(model_path, 'rb') as f: self.global_model = pickle.load(f)
+            self.logger.info(f"Global model loaded for round {round_num}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error loading global model: {e}")
+            return False
+    def _train_local_model(self):
+        try:
+            train_data = lgb.Dataset(self.X_train, label=self.y_train)
+            valid_data = lgb.Dataset(self.X_val, label=self.y_val, reference=train_data)
+            params = {'objective': 'binary', 'metric': 'auc', 'boosting_type': 'gbdt', 'num_leaves': 31, 'learning_rate': 0.05, 'feature_fraction': 0.8, 'bagging_fraction': 0.8, 'bagging_freq': 5, 'verbose': -1, 'random_state': 42 + self.client_id, 'is_unbalance': True}
+            self.logger.info(f"Starting local training for round {self.current_round}...")
+            self.local_model = lgb.train(params, train_data, num_boost_round=50, valid_sets=[valid_data], init_model=self.global_model, callbacks=[lgb.early_stopping(10, verbose=False), lgb.log_evaluation(period=0)])
+            y_pred_val = self.local_model.predict(self.X_val)
+            local_auc = roc_auc_score(self.y_val, y_pred_val)
+            self.logger.info(f"Local training finished. Local validation AUC: {local_auc:.4f}")
+        except Exception as e:
+            self.logger.error(f"Error during local training: {e}", exc_info=True)
+            self.local_model = self.global_model
+    def _save_local_model(self):
+        try:
+            model_filename = f'client_{self.client_id}_round_{self.current_round}_model.pkl'
+            model_path = os.path.join(self.models_dir, model_filename)
+            metadata_filename = f'client_{self.client_id}_round_{self.current_round}_metadata.json'
+            metadata_path = os.path.join(self.models_dir, metadata_filename)
+            with open(model_path, 'wb') as f: pickle.dump(self.local_model, f)
+            metadata = {'client_id': self.client_id, 'round': self.current_round, 'timestamp': datetime.now().isoformat(), 'model_path': model_path, 'num_training_samples': len(self.X_train)}
+            with open(metadata_path, 'w') as f: json.dump(metadata, f, indent=2)
+            self.logger.info(f"Local model and metadata for round {self.current_round} saved to NFS.")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error saving local model: {e}")
+            return False
+    def _wait_for_round_completion(self, round_num, timeout=300):
+        self.logger.info(f"Waiting for server to complete round {round_num}...")
+        start_time = time.time()
+        completion_flag = os.path.join(self.status_dir, f'round_{round_num}_completed.flag')
+        while not os.path.exists(completion_flag):
+            if time.time() - start_time > timeout:
+                self.logger.warning(f"Timeout waiting for round {round_num} completion signal.")
+                return False
+            time.sleep(5)
+        self.logger.info(f"Server completed aggregation for round {round_num}.")
+        return True
     
-    client.run_federated_learning(max_rounds=5)
+    def run_federated_learning(self):
+        for round_num in range(1, self.max_rounds + 1):
+            self.current_round = round_num
+            self.logger.info(f"\n--- STARTING ROUND {self.current_round}/{self.max_rounds} ---")
+            if not self._wait_for_global_model(self.current_round): break
+            if not self._load_global_model(self.current_round): break
+            self._train_local_model()
+            if not self._save_local_model(): break
+            self.logger.info(f"Round {self.current_round} completed. Waiting for the next round.")
+            if round_num < self.max_rounds: self._wait_for_round_completion(self.current_round)
+        self.logger.info(f"Client {self.client_id} has finished all federated learning rounds.")
+
+# --- BAGIAN UTAMA YANG BERBEDA ---
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Federated Learning Client 1')
+    parser.add_argument('--nfs-path', default='/shared/federated_learning', help='NFS mount path')
+    parser.add_argument('--max-rounds', type=int, default=5, help='Maximum number of federated rounds')
+    args = parser.parse_args()
+    
+    # ID Klien ditetapkan secara eksplisit
+    CLIENT_ID = 1
+    
+    print(f"--- Starting Federated Learning Client {CLIENT_ID} ---")
+    
+    try:
+        client = NFSFederatedClient(
+            client_id=CLIENT_ID,
+            nfs_path=args.nfs_path,
+            max_rounds=args.max_rounds
+        )
+        client.run_federated_learning()
+    except Exception as e:
+        logging.error(f"Critical error in client {CLIENT_ID}: {e}", exc_info=True)
+
+    print(f"--- Client {CLIENT_ID} has completed its tasks. ---")
