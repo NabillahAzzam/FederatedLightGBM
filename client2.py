@@ -117,17 +117,43 @@ class NFSFederatedClient:
             self.logger.error(f"Error loading global model: {e}")
             return False
     def _train_local_model(self):
+        """Train local LightGBM model using the Scikit-Learn API."""
         try:
-            train_data = lgb.Dataset(self.X_train, label=self.y_train)
-            valid_data = lgb.Dataset(self.X_val, label=self.y_val, reference=train_data)
-            params = {'objective': 'binary', 'metric': 'auc', 'boosting_type': 'gbdt', 'num_leaves': 31, 'learning_rate': 0.05, 'feature_fraction': 0.8, 'bagging_fraction': 0.8, 'bagging_freq': 5, 'verbose': -1, 'random_state': 42 + self.client_id, 'is_unbalance': True}
+            # Pastikan model global yang dimuat juga berupa LGBMClassifier
+            # jika tidak, buat instance baru tapi jangan di-fit
+            if not isinstance(self.global_model, lgb.LGBMClassifier):
+                self.logger.warning("Global model is not an LGBMClassifier. Starting training from scratch for this round.")
+                # Fallback: jika model global bukan classifier, latih dari awal
+                self.local_model = lgb.LGBMClassifier(
+                    objective='binary',
+                    metric='auc',
+                    is_unbalance=True,
+                    random_state=42 + self.client_id
+                )
+            else:
+                # Ini adalah objek LGBMClassifier yang sudah dilatih (dari ronde sebelumnya)
+                self.local_model = self.global_model 
+
             self.logger.info(f"Starting local training for round {self.current_round}...")
-            self.local_model = lgb.train(params, train_data, num_boost_round=50, valid_sets=[valid_data], init_model=self.global_model, callbacks=[lgb.early_stopping(10, verbose=False), lgb.log_evaluation(period=0)])
-            y_pred_val = self.local_model.predict(self.X_val)
-            local_auc = roc_auc_score(self.y_val, y_pred_val)
+
+            # Gunakan metode .fit() dari Scikit-Learn API
+            # `init_model` dalam .fit() akan menggunakan booster dari model global
+            self.local_model.fit(
+                self.X_train, self.y_train,
+                eval_set=[(self.X_val, self.y_val)],
+                eval_metric='auc',
+                callbacks=[lgb.early_stopping(10, verbose=False)],
+                init_model=self.global_model.booster_ if hasattr(self.global_model, 'booster_') else self.global_model
+            )
+
+            # Evaluasi performa lokal
+            y_pred_val_proba = self.local_model.predict_proba(self.X_val)[:, 1]
+            local_auc = roc_auc_score(self.y_val, y_pred_val_proba)
             self.logger.info(f"Local training finished. Local validation AUC: {local_auc:.4f}")
+            
         except Exception as e:
             self.logger.error(f"Error during local training: {e}", exc_info=True)
+            # Jika pelatihan gagal, kembalikan model global agar tidak mengirim model yang rusak
             self.local_model = self.global_model
     def _save_local_model(self):
         try:
